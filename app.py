@@ -1,25 +1,30 @@
+purtroppo ti sei interrotto qui (puoi completare il codice che stai scrivendo?):
 import os
 from datetime import datetime
 from flask import Flask, jsonify, request, Response
+from bs4 import BeautifulSoup
+import requests
+import re
 
 app = Flask(__name__)
 
-# ---- Endpoints di base (già esistenti/compatibili) --------------------------
+# -----------------------------------------------------------------------------
+# Health
+# -----------------------------------------------------------------------------
 @app.get("/health")
 def health():
     return jsonify(ok=True, service="investment-sentinel-api")
 
-# --- FinanzAmille: digest (usa env e permette override via query) ---
+# -----------------------------------------------------------------------------
+# FinanzAmille: digest (usa env e permette override via query)
+# -----------------------------------------------------------------------------
 @app.get("/finanzamille/digest")
 def fm_digest():
-    import os, re, requests
-    from flask import request, jsonify
-
     base = os.getenv("FM_BASE_URL", "https://www.finanzamille.com").rstrip("/")
     cookie = os.getenv("FM_COOKIE", "")
     default_path = os.getenv("FM_CONTENT_PATH", "/corso-1-1")
 
-    # Permetti override da query: ?path=/corso-1-1 oppure ?url=https://www.finanzamille.com/corso-1-1
+    # Override via query: ?path=/corso-1-1 oppure ?url=https://www.finanzamille.com/corso-1-1
     q_path = request.args.get("path")
     q_url = request.args.get("url")
 
@@ -42,14 +47,12 @@ def fm_digest():
     except Exception as e:
         return jsonify({"ok": False, "error": f"request_error: {e}", "fetched_url": target}), 502
 
-    # Se porta alla pagina login/403 -> cookie non valido
     if r.status_code in (401, 403) or "login" in r.url:
         return jsonify({"ok": False, "error": "unauthorized", "fetched_url": target, "final_url": r.url}), 401
 
     if r.status_code != 200:
         return jsonify({"ok": False, "error": f"http_{r.status_code}", "fetched_url": target, "final_url": r.url}), r.status_code
 
-    # Estraggo solo il <title> per validare che stiamo leggendo la pagina protetta
     m = re.search(r"<title>(.*?)</title>", r.text, re.I | re.S)
     title = (m.group(1).strip() if m else "")
 
@@ -60,13 +63,11 @@ def fm_digest():
         "length": len(r.text),
         "title": title
     }), 200
-# --- fine route ---
 
-# --------- FinanzAmille helpers + routes: article & batch ---------
-from bs4 import BeautifulSoup
-
+# -----------------------------------------------------------------------------
+# FinanzAmille: helpers + routes: article e batch
+# -----------------------------------------------------------------------------
 def fm_fetch(target_url: str):
-    import os, requests
     cookie = os.getenv("FM_COOKIE", "")
     headers = {
         "Cookie": cookie,
@@ -87,19 +88,18 @@ def extract_article_fields(html: str):
     elif soup.title and soup.title.get_text(strip=True):
         title = soup.title.get_text(strip=True)
 
-    # Corpo: prendi paragrafi dentro article, altrimenti tutti i <p> principali
+    # Corpo: paragrafi dentro <article>, altrimenti fallback ai <p> principali
     body_texts = []
     article_tag = soup.find("article")
     if article_tag:
         body_texts = [p.get_text(" ", strip=True) for p in article_tag.find_all("p")]
     if not body_texts:
-        # Fallback generico
         candidates = soup.select("main p") or soup.find_all("p")
         body_texts = [p.get_text(" ", strip=True) for p in candidates]
 
     text = "\n".join([t for t in body_texts if t])
 
-    # Mini-riassunto euristico (prime 3-4 frasi)
+    # Mini riassunto euristico: prime 3-4 frasi
     summary = ""
     if text:
         sentences = [s.strip() for s in text.split(".") if s.strip()]
@@ -109,9 +109,6 @@ def extract_article_fields(html: str):
 
 @app.get("/finanzamille/article")
 def fm_article():
-    from flask import request, jsonify
-    import os
-
     base = os.getenv("FM_BASE_URL", "https://www.finanzamille.com").rstrip("/")
     url = request.args.get("url")
     if not url:
@@ -137,9 +134,6 @@ def fm_article():
 
 @app.get("/finanzamille/batch")
 def fm_batch():
-    from flask import request, jsonify
-    import os
-
     base = os.getenv("FM_BASE_URL", "https://www.finanzamille.com").rstrip("/")
     urls = request.args.getlist("url")
     if not urls:
@@ -159,53 +153,59 @@ def fm_batch():
             items.append({"ok": False, "url": full, "error": str(e)})
 
     return jsonify({"ok": True, "count": len(items), "items": items}), 200
-# --------- fine blocco ---------
 
+# -----------------------------------------------------------------------------
+# News: stub macro PM USA
+# -----------------------------------------------------------------------------
 @app.get("/news/scan")
 def news_scan():
-    # Stub PM-USA. window/region per compatibilità
     region = request.args.get("region", "us")
     window = request.args.get("window", "6h")
     items = [
-        {"headline": "Fed officials: 'higher for longer' sul tavolo", "tags": ["rates","fed"], "impact":"medium"},
-        {"headline": "NASDAQ green nel pomeriggio", "tags": ["tech","equities"], "impact":"low"},
+        {"headline": "Fed officials: higher for longer sul tavolo", "tags": ["rates", "fed"], "impact": "medium"},
+        {"headline": "NASDAQ verde nel pomeriggio", "tags": ["tech", "equities"], "impact": "low"},
     ]
     return jsonify(ok=True, region=region, window=window, items=items)
 
+# -----------------------------------------------------------------------------
+# Alpaca: health placeholder
+# -----------------------------------------------------------------------------
 @app.get("/alpaca/health")
 def alpaca_health():
-    # Quando avrai le API, qui metteremo la vera chiamata
     return jsonify(ok=True, broker="alpaca", connected=False)
 
-# ---- Aggregatore: /brief ----------------------------------------------------
-def _mk_recommendations(fm, news):
-    recs = []
-    # Esempio di logica super semplice
-    if any(i.get("sentiment") == "negative" and "energy" in i.get("topics", []) for i in fm.get("items", [])):
-        recs.append("Energia debole: valuta stop-loss più stretti su titoli energy.")
-    if any("fed" in (i.get("tags") or []) for i in news.get("items", [])):
-        recs.append("Tassi: profilo prudente; evita nuova leva finché il quadro sui rendimenti non migliora.")
-    if not recs:
-        recs.append("Nessuna urgenza. Mantieni impostazione conservativa.")
-    return recs
-
+# -----------------------------------------------------------------------------
+# Brief: aggregatore senza OpenAI
+# -----------------------------------------------------------------------------
 @app.get("/brief/run")
 def brief_run():
-    # Chiama internamente le funzioni sopra (più veloce/robusto di richiamare via HTTP)
-    fm = finanzamille_digest().get_json()
+    # Compone i dati senza funzioni inesistenti e senza OpenAI
+    base = os.getenv("BASE_API_URL", "").rstrip("/")
+    fm_urls_env = os.getenv("FM_URLS", "").strip()
+
+    fm_items = []
+    if base and fm_urls_env:
+        fm_list = [u.strip() for u in fm_urls_env.split(",") if u.strip()]
+        q = "&".join([f"url={requests.utils.quote(u, safe='')}" for u in fm_list])
+        try:
+            r = requests.get(f"{base}/finanzamille/batch?{q}", timeout=30)
+            if r.ok:
+                j = r.json()
+                if j.get("ok"):
+                    fm_items = j.get("items", [])
+        except Exception:
+            fm_items = []
+
     nws = news_scan().get_json()
     alp = alpaca_health().get_json()
 
     ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    recommendations = _mk_recommendations(fm, nws)
-
     payload = {
         "ok": True,
         "generated_at": ts,
-        "finanzamille": fm,
+        "finanzamille": {"items": fm_items},
         "news": nws,
-        "alpaca": alp,
-        "recommendations": recommendations
+        "alpaca": alp
     }
     return jsonify(payload)
 
@@ -213,28 +213,47 @@ def brief_run():
 def brief_text():
     data = brief_run().get_json()
     lines = []
-    lines.append(f"[Investment Sentinel] Brief – {data['generated_at']}")
+    lines.append(f"[Investment Sentinel] Brief - {data['generated_at']}")
     lines.append("")
+
     # FinanzAmille
-    lines.append("— FinanzAmille (ultimi):")
-    for it in data["finanzamille"]["items"]:
-        lines.append(f"  • {it['title']}  [sentiment: {it['sentiment']}]")
+    lines.append("FinanzAmille (oggi)")
+    if data["finanzamille"]["items"]:
+        for it in data["finanzamille"]["items"]:
+            title = (it.get("title") or "").strip()
+            summary = (it.get("summary") or "").strip().replace("\n", " ")
+            if title or summary:
+                lines.append(f"* {title} - {summary[:220]}")
+    else:
+        lines.append("* Nessun articolo disponibile o accesso non valido")
     lines.append("")
+
     # News
-    lines.append(f"— News scan ({data['news']['region']}, {data['news']['window']}):")
-    for it in data["news"]["items"]:
-        lines.append(f"  • {it['headline']}  [impact: {it['impact']}]")
+    lines.append("Mercati (PM USA)")
+    news_items = data.get("news", {}).get("items", [])
+    if news_items:
+        for it in news_items:
+            headline = it.get("headline", "")
+            impact = it.get("impact", "")
+            if headline:
+                lines.append(f"* {headline} [{impact}]")
+    else:
+        lines.append("* Nessun aggiornamento macro disponibile")
     lines.append("")
-    # Alpaca
-    lines.append(f"— Broker: Alpaca connected={data['alpaca']['connected']}")
+
+    # Broker
+    alp = data.get("alpaca", {})
+    lines.append(f"Broker: Alpaca connected={alp.get('connected', False)}")
     lines.append("")
-    # Azioni consigliate
-    lines.append("— Azioni consigliate:")
-    for r in data["recommendations"]:
-        lines.append(f"  • {r}")
+
+    # Azioni proposte - placeholder conservativo
+    lines.append("Azioni proposte")
+    lines.append("* Nessuna urgenza. Mantieni profilo prudente. Per piazzare ordini rispondi con CONFERMO e dettagli.")
     txt = "\n".join(lines)
     return Response(txt, mimetype="text/plain")
 
-# ---- Avvio WSGI -------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Avvio WSGI
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
