@@ -62,6 +62,105 @@ def fm_digest():
     }), 200
 # --- fine route ---
 
+# --------- FinanzAmille helpers + routes: article & batch ---------
+from bs4 import BeautifulSoup
+
+def fm_fetch(target_url: str):
+    import os, requests
+    cookie = os.getenv("FM_COOKIE", "")
+    headers = {
+        "Cookie": cookie,
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    r = requests.get(target_url, headers=headers, timeout=25, allow_redirects=True)
+    return r
+
+def extract_article_fields(html: str):
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Titolo: prova h1, poi title
+    title = ""
+    h1 = soup.find("h1")
+    if h1 and h1.get_text(strip=True):
+        title = h1.get_text(strip=True)
+    elif soup.title and soup.title.get_text(strip=True):
+        title = soup.title.get_text(strip=True)
+
+    # Corpo: prendi paragrafi dentro article, altrimenti tutti i <p> principali
+    body_texts = []
+    article_tag = soup.find("article")
+    if article_tag:
+        body_texts = [p.get_text(" ", strip=True) for p in article_tag.find_all("p")]
+    if not body_texts:
+        # Fallback generico
+        candidates = soup.select("main p") or soup.find_all("p")
+        body_texts = [p.get_text(" ", strip=True) for p in candidates]
+
+    text = "\n".join([t for t in body_texts if t])
+
+    # Mini-riassunto euristico (prime 3-4 frasi)
+    summary = ""
+    if text:
+        sentences = [s.strip() for s in text.split(".") if s.strip()]
+        summary = ". ".join(sentences[:4]) + ("." if sentences[:4] else "")
+
+    return title, text, summary
+
+@app.get("/finanzamille/article")
+def fm_article():
+    from flask import request, jsonify
+    import os
+
+    base = os.getenv("FM_BASE_URL", "https://www.finanzamille.com").rstrip("/")
+    url = request.args.get("url")
+    if not url:
+        return jsonify({"ok": False, "error": "missing url"}), 400
+    if url.startswith("/"):
+        url = base + url
+
+    r = fm_fetch(url)
+    if r.status_code in (401, 403) or "login" in r.url:
+        return jsonify({"ok": False, "error": "unauthorized", "fetched_url": url, "final_url": r.url}), 401
+    if r.status_code != 200:
+        return jsonify({"ok": False, "error": f"http_{r.status_code}", "fetched_url": url, "final_url": r.url}), r.status_code
+
+    title, text, summary = extract_article_fields(r.text)
+    return jsonify({
+        "ok": True,
+        "url": url,
+        "final_url": r.url,
+        "title": title,
+        "summary": summary,
+        "chars": len(text)
+    }), 200
+
+@app.get("/finanzamille/batch")
+def fm_batch():
+    from flask import request, jsonify
+    import os
+
+    base = os.getenv("FM_BASE_URL", "https://www.finanzamille.com").rstrip("/")
+    urls = request.args.getlist("url")
+    if not urls:
+        return jsonify({"ok": False, "error": "missing url params"}), 400
+
+    items = []
+    for u in urls:
+        full = base + u if u.startswith("/") else u
+        try:
+            r = fm_fetch(full)
+            if r.status_code == 200 and "login" not in r.url:
+                title, text, summary = extract_article_fields(r.text)
+                items.append({"ok": True, "url": full, "title": title, "summary": summary})
+            else:
+                items.append({"ok": False, "url": full, "status": r.status_code, "final_url": r.url})
+        except Exception as e:
+            items.append({"ok": False, "url": full, "error": str(e)})
+
+    return jsonify({"ok": True, "count": len(items), "items": items}), 200
+# --------- fine blocco ---------
+
 @app.get("/news/scan")
 def news_scan():
     # Stub PM-USA. window/region per compatibilità
