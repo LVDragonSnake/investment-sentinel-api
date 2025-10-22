@@ -265,7 +265,8 @@ if __name__ == "__main__":
 def brief_direct():
     import requests
     try:
-        r = requests.get("https://investment-sentinel-api-new.onrender.com/brief/text", timeout=20)
+        # Chiamata locale invece che HTTP esterna (evita il Bad Gateway)
+        r = requests.get("http://localhost:10000/brief/text", timeout=25)
         if r.status_code == 200:
             return Response(r.text, mimetype="text/plain")
         return jsonify({"error": f"HTTP {r.status_code}"}), r.status_code
