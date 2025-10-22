@@ -9,54 +9,58 @@ app = Flask(__name__)
 def health():
     return jsonify(ok=True, service="investment-sentinel-api")
 
-# --- Finanzamille digest (con fallback) ---
+# --- FinanzAmille: digest (usa env e permette override via query) ---
 @app.get("/finanzamille/digest")
-def finanzamille_digest():
-    import os, json
-    import requests
-    from bs4 import BeautifulSoup
+def fm_digest():
+    import os, re, requests
+    from flask import request, jsonify
 
-    limit = int(request.args.get("limit", 8))
+    base = os.getenv("FM_BASE_URL", "https://www.finanzamille.com").rstrip("/")
+    cookie = os.getenv("FM_COOKIE", "")
+    default_path = os.getenv("FM_CONTENT_PATH", "/corso-1-1")
 
-    # (Opzionale) se in futuro vorrai passare da cookie:
-    fm_cookie = os.getenv("FINANZAMILLE_COOKIE", "").strip()
-    fm_url    = os.getenv("FINANZAMILLE_URL", "https://www.finanzamille.com/daily-news")
+    # Permetti override da query: ?path=/corso-1-1 oppure ?url=https://www.finanzamille.com/corso-1-1
+    q_path = request.args.get("path")
+    q_url = request.args.get("url")
+
+    if q_url:
+        target = q_url
+    else:
+        path = q_path or default_path or "/corso-1-1"
+        if not path.startswith("/"):
+            path = "/" + path
+        target = f"{base}{path}"
+
+    headers = {
+        "Cookie": cookie,
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
 
     try:
-        headers = {}
-        if fm_cookie:
-            headers["Cookie"] = fm_cookie
-
-        # Primo tentativo: pagina pubblica “daily news” (non serve devtools)
-        r = requests.get(fm_url, headers=headers, timeout=12)
-        r.raise_for_status()
-
-        # Parsing HTML base (prende i link/articoli visibili nella pagina)
-        soup = BeautifulSoup(r.text, "html.parser")
-        items = []
-        # Heuristica semplice: prendi <a> con href che contiene "/blog-2-1/"
-        for a in soup.select('a[href*="/blog-2-1/"]')[:limit]:
-            title = (a.get_text() or "").strip()
-            url = a.get("href") or ""
-            if title and url:
-                items.append({
-                    "title": title,
-                    "url": url if url.startswith("http") else f"https://www.finanzamille.com{url}",
-                    "summary": "",
-                    "sentiment": "unknown"
-                })
-
-        # Se non abbiamo trovato nulla, usa fallback demo (così non rompiamo i test)
-        if not items:
-            items = [
-                {"title": "Esempio: Tassi in rialzo", "url": "#", "summary": "", "sentiment": "neutral"},
-                {"title": "Esempio: Tech rimbalza", "url": "#", "summary": "", "sentiment": "positive"},
-            ][:limit]
-
-        return jsonify(ok=True, count=len(items), items=items)
-
+        r = requests.get(target, headers=headers, timeout=25, allow_redirects=True)
     except Exception as e:
-        return jsonify(ok=False, error=str(e)), 500
+        return jsonify({"ok": False, "error": f"request_error: {e}", "fetched_url": target}), 502
+
+    # Se porta alla pagina login/403 -> cookie non valido
+    if r.status_code in (401, 403) or "login" in r.url:
+        return jsonify({"ok": False, "error": "unauthorized", "fetched_url": target, "final_url": r.url}), 401
+
+    if r.status_code != 200:
+        return jsonify({"ok": False, "error": f"http_{r.status_code}", "fetched_url": target, "final_url": r.url}), r.status_code
+
+    # Estraggo solo il <title> per validare che stiamo leggendo la pagina protetta
+    m = re.search(r"<title>(.*?)</title>", r.text, re.I | re.S)
+    title = (m.group(1).strip() if m else "")
+
+    return jsonify({
+        "ok": True,
+        "fetched_url": target,
+        "final_url": r.url,
+        "length": len(r.text),
+        "title": title
+    }), 200
+# --- fine route ---
 
 @app.get("/news/scan")
 def news_scan():
