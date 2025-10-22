@@ -1,55 +1,134 @@
-import os
-from flask import Flask, jsonify, request
-from flask_cors import CORS
+import os, datetime as dt
+from flask import Flask, request, jsonify
+import re
+import requests
 
 app = Flask(__name__)
-CORS(app)
 
+# ---- Helpers -------------------------------------------------
+def is_valid_fm_link(url: str) -> bool:
+    # accetta solo gli articoli reali
+    return bool(re.search(r"https?://(www\.)?finanzamille\.com/blog-2-1/[\w-]+", url))
+
+def now_utc_iso():
+    return dt.datetime.utcnow().replace(microsecond=0).isoformat()+"Z"
+
+# ---- Root & Health ------------------------------------------
 @app.get("/")
 def root():
-    return jsonify({"ok": True, "message": "Investment Sentinel API is live"})
+    return jsonify(ok=True, service="investment-sentinel-api", time=now_utc_iso())
 
 @app.get("/health")
 def health():
-    return jsonify({"ok": True, "service": "investment-sentinel-api"})
+    return jsonify(ok=True, service="investment-sentinel-api")
 
-# --------- PLACEHOLDER ENDPOINTS (funzionanti) ----------
-# Sostituiremo la logica appena è tutto live
-
+# ---- FinanzAmille digest ------------------------------------
 @app.get("/finanzamille/digest")
 def finanzamille_digest():
-    # placeholder: torna una lista finta per verificare il wiring
-    items = [
-        {"title": "Esempio: Tassi in rialzo", "sentiment": "neutral", "topics": ["rates", "macro"]},
-        {"title": "Esempio: Tech rimbalza", "sentiment": "positive", "topics": ["equities", "tech"]},
+    """
+    Ritorna ultimi articoli (titolo, url). Usa lista/landing pubbliche e filtra i link veri.
+    Parametri: limit (default 5)
+    """
+    limit = int(request.args.get("limit", 5))
+    # Pagine note che elencano articoli; se ne hai altre, aggiungile
+    seeds = [
+        "https://www.finanzamille.com/daily-news",     # calendario articoli
+        "https://www.finanzamille.com",                # home
     ]
-    return jsonify({"ok": True, "count": len(items), "items": items})
 
-@app.get("/global/news")
-def global_news():
-    headlines = [
-        "US: Powell speech at 2pm ET",
-        "EU: PMI flash above consensus",
-        "Asia: Nikkei flat into close",
+    items = []
+    seen = set()
+    headers = {"User-Agent": "Mozilla/5.0"}
+    for seed in seeds:
+        try:
+            html = requests.get(seed, headers=headers, timeout=12).text
+        except Exception:
+            continue
+        # estrai link + anchor testuale grezza
+        for m in re.finditer(r'href="([^"]+)"[^>]*>([^<]{3,120})</a>', html, flags=re.I):
+            url, text = m.group(1), re.sub(r"\s+", " ", m.group(2)).strip()
+            if not url.startswith("http"):
+                if url.startswith("/"): url = f"https://www.finanzamille.com{url}"
+                else: url = f"https://www.finanzamille.com/{url}"
+            if is_valid_fm_link(url) and url not in seen:
+                seen.add(url)
+                # filtra testi inutili
+                if text.lower() in {"entra","accedi","scopri di più","newsletter gratuita"}: 
+                    continue
+                items.append({"title": text, "url": url})
+            if len(items) >= limit:
+                break
+        if len(items) >= limit:
+            break
+
+    return jsonify(ok=True, count=len(items), items=items)
+
+# ---- News scan (placeholder) --------------------------------
+@app.get("/news/scan")
+def news_scan():
+    """
+    Piccolo riassunto statico/placeholder. Param: region, window.
+    Sostituire in seguito con provider news.
+    """
+    region = request.args.get("region","us")
+    window = request.args.get("window","6h")
+    bullets = [
+        f"[{region.upper()}] Fed speakers in focus; rates sensitive sectors volatile",
+        "Oil edges lower; USD mixed; mega-cap tech outperforms",
+        "IG/HY credit stable; VIX subdued; gold flat",
     ]
-    return jsonify({"ok": True, "headlines": headlines})
+    return jsonify(ok=True, region=region, window=window, headlines=bullets)
 
-@app.post("/portfolio/csv")
-def portfolio_csv():
-    # Accetta CSV incollato nel body (content-type: text/plain oppure json {csv:"..."})
-    csv_text = request.get_data(as_text=True) or (request.json or {}).get("csv", "")
-    if not csv_text.strip():
-        return jsonify({"ok": False, "error": "CSV mancante nel body"}), 400
-    # placeholder: calcolo finto
-    return jsonify({"ok": True, "positions": 10, "pnls": {"day": 12.34, "total": 345.67}})
+# ---- Portfolio CSV import -----------------------------------
+@app.post("/portfolio/csv/import")
+def portfolio_csv_import():
+    """
+    Accetta:
+      - file multipart 'file' (CSV con header: ticker,qty,buy_price,buy_date,account)
+      - oppure JSON: { 'csv_url': 'https://...' } (Drive/Dropbox pubblico)
+    Ritorna parse + PnL grezzo (prezzi spot placeholder= None).
+    """
+    import csv, io
 
-@app.post("/alpaca/bridge")
-def alpaca_bridge():
-    # placeholder: verifica solo che le env esistano (non obbligatorie)
+    def parse_csv(content: str):
+        reader = csv.DictReader(io.StringIO(content))
+        rows = []
+        for r in reader:
+            try:
+                rows.append({
+                    "ticker": r["ticker"].strip().upper(),
+                    "qty": float(r["qty"]),
+                    "buy_price": float(r["buy_price"]),
+                    "buy_date": r.get("buy_date",""),
+                    "account": r.get("account","ibkr"),
+                })
+            except Exception:
+                continue
+        return rows
+
+    content = None
+    if "file" in request.files:
+        content = request.files["file"].read().decode("utf-8", errors="ignore")
+    else:
+        data = request.get_json(silent=True) or {}
+        csv_url = data.get("csv_url")
+        if csv_url:
+            content = requests.get(csv_url, timeout=15).text
+
+    if not content:
+        return jsonify(ok=False, error="No CSV provided"), 400
+
+    rows = parse_csv(content)
+
+    # TODO prezzi spot: integrare provider (es. Alpaca/Polygon). Per ora None.
+    for r in rows:
+        r["spot"] = None
+        r["pnl"] = None
+
+    return jsonify(ok=True, positions=rows, count=len(rows))
+
+# ---- Alpaca health (placeholder) ----------------------------
+@app.get("/alpaca/health")
+def alpaca_health():
     have_keys = bool(os.environ.get("ALPACA_API_KEY")) and bool(os.environ.get("ALPACA_SECRET_KEY"))
-    return jsonify({"ok": True, "keys_present": have_keys})
-
-# ---------- MAIN (per local dev). In Render usa GUNICORN ----------
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    return jsonify(ok=True, connected=have_keys)
