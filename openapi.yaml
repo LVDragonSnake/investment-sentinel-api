@@ -1,0 +1,53 @@
+openapi: 3.1.0
+info:
+  title: Investment Sentinel API
+  version: "1.0.0"
+servers:
+  - url: https://investment-sentinel-api-new.onrender.com
+paths:
+  /health:
+    get:
+      operationId: health
+      summary: Service health
+      responses:
+        "200":
+          description: ok
+  /finanzamille/digest:
+    get:
+      operationId: finanzamille_digest
+      summary: Fetch FinanzaMille digest
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, default: 8, minimum: 1, maximum: 20 }
+      responses:
+        "200":
+          description: digest
+  /news/scan:
+    get:
+      operationId: global_news_scan
+      summary: Scan global/US market headlines
+      parameters:
+        - in: query
+          name: region
+          schema: { type: string, default: us }
+        - in: query
+          name: window
+          schema: { type: string, default: 6h }
+      responses:
+        "200":
+          description: headlines
+  /portfolio/csv/import:
+    get:
+      operationId: portfolio_csv_import
+      summary: Import portfolio from CSV/Drive proxy
+      responses:
+        "200":
+          description: positions
+  /alpaca/health:
+    get:
+      operationId: alpaca_bridge
+      summary: Alpaca bridge health
+      responses:
+        "200":
+          description: status
