@@ -1,7 +1,6 @@
 import os
 import re
 from datetime import datetime
-
 from flask import Flask, jsonify, request, Response
 from bs4 import BeautifulSoup
 import requests
@@ -46,7 +45,7 @@ def fm_digest():
     except Exception as e:
         return jsonify({"ok": False, "error": f"request_error: {e}", "fetched_url": target}), 502
 
-    if r.status_code in (401, 403) or "login" in r.url:
+    if r.status_code in (401, 403) or "login" in r.url.lower():
         return jsonify({"ok": False, "error": "unauthorized", "fetched_url": target, "final_url": r.url}), 401
 
     if r.status_code != 200:
@@ -116,7 +115,7 @@ def fm_article():
         url = base + url
 
     r = fm_fetch(url)
-    if r.status_code in (401, 403) or "login" in r.url:
+    if r.status_code in (401, 403) or "login" in r.url.lower():
         return jsonify({"ok": False, "error": "unauthorized", "fetched_url": url, "final_url": r.url}), 401
     if r.status_code != 200:
         return jsonify({"ok": False, "error": f"http_{r.status_code}", "fetched_url": url, "final_url": r.url}), r.status_code
@@ -143,7 +142,7 @@ def fm_batch():
         full = base + u if u.startswith("/") else u
         try:
             r = fm_fetch(full)
-            if r.status_code == 200 and "login" not in r.url:
+            if r.status_code == 200 and "login" not in r.url.lower():
                 title, text, summary = extract_article_fields(r.text)
                 items.append({"ok": True, "url": full, "title": title, "summary": summary})
             else:
@@ -174,62 +173,67 @@ def alpaca_health():
     return jsonify(ok=True, broker="alpaca", connected=False)
 
 # -----------------------------------------------------------------------------
-# Brief: aggregatore senza OpenAI
+# Brief: aggregatore (in-process, no HTTP interni)
 # -----------------------------------------------------------------------------
-@app.get("/brief/run")
-def brief_run():
-    """
-    Aggrega il brief SENZA chiamate HTTP interne.
-    Legge FM_URLS e per ogni URL fa fetch+parse in-process.
-    Così /brief/direct e /wake restano coerenti anche subito
-    dopo il wake-up.
-    """
+def build_brief_payload():
+    """Raccoglie tutto in JSON senza chiamate HTTP interne."""
     fm_urls_env = os.getenv("FM_URLS", "").strip()
     fm_items = []
 
     if fm_urls_env:
         fm_list = [u.strip() for u in fm_urls_env.split(",") if u.strip()]
         for u in fm_list:
-            # Normalizza: se parte con "/" premettiamo FM_BASE_URL
+            # Normalizza eventuali path relativi
             if u.startswith("/"):
                 base = os.getenv("FM_BASE_URL", "https://www.finanzamille.com").rstrip("/")
                 full = base + u
             else:
                 full = u
-
             try:
                 r = fm_fetch(full)
                 if r.status_code == 200 and "login" not in r.url.lower():
                     title, text, summary = extract_article_fields(r.text)
-                    fm_items.append({
-                        "ok": True,
-                        "url": full,
-                        "title": title,
-                        "summary": summary
-                    })
+                    fm_items.append({"ok": True, "url": full, "title": title, "summary": summary})
                 else:
-                    fm_items.append({
-                        "ok": False,
-                        "url": full,
-                        "status": r.status_code,
-                        "final_url": r.url
-                    })
+                    fm_items.append({"ok": False, "url": full, "status": r.status_code, "final_url": r.url})
             except Exception as e:
                 fm_items.append({"ok": False, "url": full, "error": str(e)})
 
-    # News + Alpaca restano come prima (stub)
     nws = news_scan().get_json()
     alp = alpaca_health().get_json()
 
     ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    payload = {
+    return {
         "ok": True,
         "generated_at": ts,
         "finanzamille": {"items": fm_items},
         "news": nws,
         "alpaca": alp
     }
-    return jsonify(payload)
+
+@app.get("/brief/run")
+def brief_run():
+    return jsonify(build_brief_payload())
+
+@app.get("/brief/text")
+def brief_text():
+    data = build_brief_payload()
+    lines = []
+    lines.append(f"[Investment Sentinel] Brief - {data['generated_at']}")
+    lines.append("")
+
+    # FinanzAmille
+    lines.append("FinanzAmille (oggi)")
+    items = data.get("finanzamille", {}).get("items", [])
+    if items:
+        for it in items:
+            title = (it.get("title") or "").strip()
+            summary = (it.get("summary") or "").strip().replace("\n", " ")
+            if title or summary:
+                lines.append(f"* {title} - {summary[:220]}")
+    else:
+        lines.append("* Nessun articolo disponibile o accesso non valido")
+    lines.append("")
 
     # News
     lines.append("Mercati (PM USA)")
@@ -252,11 +256,12 @@ def brief_run():
     # Azioni proposte - placeholder conservativo
     lines.append("Azioni proposte")
     lines.append("* Nessuna urgenza. Mantieni profilo prudente. Per piazzare ordini rispondi con CONFERMO e dettagli.")
+
     txt = "\n".join(lines)
     return Response(txt, mimetype="text/plain")
 
 # -----------------------------------------------------------------------------
-# Wrapper comodi (niente HTTP interno)
+# Wrapper comodi (in-process)
 # -----------------------------------------------------------------------------
 @app.get("/brief/direct")
 def brief_direct():
@@ -268,16 +273,12 @@ def brief_direct():
 @app.get("/wake")
 def wake():
     try:
-        resp = brief_text()  # Response(text/plain)
-        txt = resp.get_data(as_text=True)
-        if txt.strip():
-            return Response(txt, mimetype="text/plain")
-        return jsonify({"ok": False, "error": "empty brief"}), 502
+        return brief_text()
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 502
 
 # -----------------------------------------------------------------------------
-# Avvio WSGI (usato solo in esecuzione diretta)
+# Avvio WSGI (solo esecuzione diretta)
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
