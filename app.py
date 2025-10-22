@@ -256,3 +256,18 @@ def brief_text():
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
+# -----------------------------------------------------------------------------
+# Nuova task che non so dove incollare e quindi ho aggiunto alla fine
+# -----------------------------------------------------------------------------
+
+@app.get("/brief/direct")
+def brief_direct():
+    import requests
+    try:
+        r = requests.get("https://investment-sentinel-api-new.onrender.com/brief/text", timeout=20)
+        if r.status_code == 200:
+            return Response(r.text, mimetype="text/plain")
+        return jsonify({"error": f"HTTP {r.status_code}"}), r.status_code
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
