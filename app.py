@@ -13,7 +13,28 @@ app = Flask(__name__)
 @app.get("/health")
 def health():
     return jsonify(ok=True, service="investment-sentinel-api")
+@app.get("/wake")
+def wake():
+    """
+    Effettua un ping al server per assicurarsi che sia sveglio.
+    Se /brief/text non risponde, riprova automaticamente fino a 3 volte.
+    """
+    import time, requests
+    max_retries = 3
+    delay = 5  # secondi tra un tentativo e l'altro
+    last_error = None
 
+    for attempt in range(1, max_retries + 1):
+        try:
+            r = requests.get("http://localhost:10000/brief/text", timeout=25)
+            if r.status_code == 200 and r.text.strip():
+                return Response(r.text, mimetype="text/plain")
+            last_error = f"HTTP {r.status_code}"
+        except Exception as e:
+            last_error = str(e)
+        time.sleep(delay)
+
+    return jsonify({"ok": False, "error": f"Server non risponde: {last_error}"}), 502
 # -----------------------------------------------------------------------------
 # FinanzAmille: digest (usa env e permette override via query)
 # -----------------------------------------------------------------------------
