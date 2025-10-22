@@ -178,22 +178,46 @@ def alpaca_health():
 # -----------------------------------------------------------------------------
 @app.get("/brief/run")
 def brief_run():
-    base = os.getenv("BASE_API_URL", "").rstrip("/")
+    """
+    Aggrega il brief SENZA chiamate HTTP interne.
+    Legge FM_URLS e per ogni URL fa fetch+parse in-process.
+    Così /brief/direct e /wake restano coerenti anche subito
+    dopo il wake-up.
+    """
     fm_urls_env = os.getenv("FM_URLS", "").strip()
-
     fm_items = []
-    if base and fm_urls_env:
-        fm_list = [u.strip() for u in fm_urls_env.split(",") if u.strip()]
-        q = "&".join([f"url={requests.utils.quote(u, safe='')}" for u in fm_list])
-        try:
-            r = requests.get(f"{base}/finanzamille/batch?{q}", timeout=30)
-            if r.ok:
-                j = r.json()
-                if j.get("ok"):
-                    fm_items = j.get("items", [])
-        except Exception:
-            fm_items = []
 
+    if fm_urls_env:
+        fm_list = [u.strip() for u in fm_urls_env.split(",") if u.strip()]
+        for u in fm_list:
+            # Normalizza: se parte con "/" premettiamo FM_BASE_URL
+            if u.startswith("/"):
+                base = os.getenv("FM_BASE_URL", "https://www.finanzamille.com").rstrip("/")
+                full = base + u
+            else:
+                full = u
+
+            try:
+                r = fm_fetch(full)
+                if r.status_code == 200 and "login" not in r.url.lower():
+                    title, text, summary = extract_article_fields(r.text)
+                    fm_items.append({
+                        "ok": True,
+                        "url": full,
+                        "title": title,
+                        "summary": summary
+                    })
+                else:
+                    fm_items.append({
+                        "ok": False,
+                        "url": full,
+                        "status": r.status_code,
+                        "final_url": r.url
+                    })
+            except Exception as e:
+                fm_items.append({"ok": False, "url": full, "error": str(e)})
+
+    # News + Alpaca restano come prima (stub)
     nws = news_scan().get_json()
     alp = alpaca_health().get_json()
 
@@ -206,25 +230,6 @@ def brief_run():
         "alpaca": alp
     }
     return jsonify(payload)
-
-@app.get("/brief/text")
-def brief_text():
-    data = brief_run().get_json()
-    lines = []
-    lines.append(f"[Investment Sentinel] Brief - {data['generated_at']}")
-    lines.append("")
-
-    # FinanzAmille
-    lines.append("FinanzAmille (oggi)")
-    if data["finanzamille"]["items"]:
-        for it in data["finanzamille"]["items"]:
-            title = (it.get("title") or "").strip()
-            summary = (it.get("summary") or "").strip().replace("\n", " ")
-            if title or summary:
-                lines.append(f"* {title} - {summary[:220]}")
-    else:
-        lines.append("* Nessun articolo disponibile o accesso non valido")
-    lines.append("")
 
     # News
     lines.append("Mercati (PM USA)")
