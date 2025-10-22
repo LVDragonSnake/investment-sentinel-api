@@ -1,4 +1,3 @@
-purtroppo ti sei interrotto qui (puoi completare il codice che stai scrivendo?):
 import os
 from datetime import datetime
 from flask import Flask, jsonify, request, Response
