@@ -11,14 +11,21 @@ def health():
 
 @app.get("/finanzamille/digest")
 def finanzamille_digest():
-    # Stub: finché non mettiamo le credenziali, restituiamo esempi coerenti
-    limit = int(request.args.get("limit", 5))
-    items = [
-        {"title": "Esempio: Tassi in rialzo", "topics": ["rates","macro"], "sentiment": "neutral"},
-        {"title": "Esempio: Tech rimbalza",   "topics": ["equities","tech"], "sentiment": "positive"},
-        {"title": "Esempio: Energia debole",  "topics": ["commodities","energy"], "sentiment": "negative"},
-    ][:limit]
-    return jsonify(ok=True, count=len(items), items=items)
+    import requests
+
+    # Endpoint reale Finanzamille
+    url = "https://finanzamille.com/api/articles"
+    params = {"limit": request.args.get("limit", 10)}
+
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            return jsonify(ok=True, count=len(data.get("items", [])), items=data.get("items", []))
+        else:
+            return jsonify(ok=False, error=f"Errore Finanzamille: {r.status_code}")
+    except Exception as e:
+        return jsonify(ok=False, error=str(e))
 
 @app.get("/news/scan")
 def news_scan():
