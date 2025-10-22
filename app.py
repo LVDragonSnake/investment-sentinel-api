@@ -1,9 +1,10 @@
 import os
+import re
 from datetime import datetime
+
 from flask import Flask, jsonify, request, Response
 from bs4 import BeautifulSoup
 import requests
-import re
 
 app = Flask(__name__)
 
@@ -13,20 +14,7 @@ app = Flask(__name__)
 @app.get("/health")
 def health():
     return jsonify(ok=True, service="investment-sentinel-api")
-@app.get("/wake")
-def wake():
-    """
-    "Ping sveglia": esegue il brief direttamente in-process (niente HTTP locale)
-    e restituisce il testo. Evita Bad Gateway / timeout.
-    """
-    try:
-        resp = brief_text()  # Response(text/plain)
-        txt = resp.get_data(as_text=True)
-        if txt.strip():
-            return Response(txt, mimetype="text/plain")
-        return jsonify({"ok": False, "error": "empty brief"}), 502
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 502
+
 # -----------------------------------------------------------------------------
 # FinanzAmille: digest (usa env e permette override via query)
 # -----------------------------------------------------------------------------
@@ -36,7 +24,6 @@ def fm_digest():
     cookie = os.getenv("FM_COOKIE", "")
     default_path = os.getenv("FM_CONTENT_PATH", "/corso-1-1")
 
-    # Override via query: ?path=/corso-1-1 oppure ?url=https://www.finanzamille.com/corso-1-1
     q_path = request.args.get("path")
     q_url = request.args.get("url")
 
@@ -191,7 +178,6 @@ def alpaca_health():
 # -----------------------------------------------------------------------------
 @app.get("/brief/run")
 def brief_run():
-    # Compone i dati senza funzioni inesistenti e senza OpenAI
     base = os.getenv("BASE_API_URL", "").rstrip("/")
     fm_urls_env = os.getenv("FM_URLS", "").strip()
 
@@ -265,21 +251,28 @@ def brief_text():
     return Response(txt, mimetype="text/plain")
 
 # -----------------------------------------------------------------------------
-# Avvio WSGI
+# Wrapper comodi (niente HTTP interno)
+# -----------------------------------------------------------------------------
+@app.get("/brief/direct")
+def brief_direct():
+    try:
+        return brief_text()
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.get("/wake")
+def wake():
+    try:
+        resp = brief_text()  # Response(text/plain)
+        txt = resp.get_data(as_text=True)
+        if txt.strip():
+            return Response(txt, mimetype="text/plain")
+        return jsonify({"ok": False, "error": "empty brief"}), 502
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+
+# -----------------------------------------------------------------------------
+# Avvio WSGI (usato solo in esecuzione diretta)
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-
-# -----------------------------------------------------------------------------
-# Nuova task che non so dove incollare e quindi ho aggiunto alla fine
-# -----------------------------------------------------------------------------
-
-from flask import Response, jsonify
-
-@app.get("/brief/direct")
-def brief_direct():
-    # Esegue il brief in-process e restituisce testo
-    try:
-        return brief_text()  # usa direttamente la tua funzione che genera il testo
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
