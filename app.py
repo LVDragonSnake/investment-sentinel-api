@@ -15,16 +15,37 @@ def health():
     return jsonify(ok=True, service="investment-sentinel-api")
 
 # -----------------------------------------------------------------------------
-# FinanzAmille: digest (usa env e permette override via query)
+# Helpers comuni (HTTP con eventuale cookie)
+# -----------------------------------------------------------------------------
+def _fm_headers():
+    cookie = os.getenv("FM_COOKIE", "")
+    return {
+        "Cookie": cookie,
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+
+def fm_fetch(url: str):
+    r = requests.get(url, headers=_fm_headers(), timeout=25, allow_redirects=True)
+    return r
+
+def _abs(base: str, href: str) -> str:
+    if href.startswith("http"):
+        return href
+    if href.startswith("/"):
+        return base.rstrip("/") + href
+    return base.rstrip("/") + "/" + href
+
+# -----------------------------------------------------------------------------
+# FinanzAmille: digest/diagnostica semplice
 # -----------------------------------------------------------------------------
 @app.get("/finanzamille/digest")
 def fm_digest():
     base = os.getenv("FM_BASE_URL", "https://www.finanzamille.com").rstrip("/")
-    cookie = os.getenv("FM_COOKIE", "")
     default_path = os.getenv("FM_CONTENT_PATH", "/corso-1-1")
 
     q_path = request.args.get("path")
-    q_url = request.args.get("url")
+    q_url  = request.args.get("url")
 
     if q_url:
         target = q_url
@@ -34,14 +55,8 @@ def fm_digest():
             path = "/" + path
         target = f"{base}{path}"
 
-    headers = {
-        "Cookie": cookie,
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
-
     try:
-        r = requests.get(target, headers=headers, timeout=25, allow_redirects=True)
+        r = requests.get(target, headers=_fm_headers(), timeout=25, allow_redirects=True)
     except Exception as e:
         return jsonify({"ok": False, "error": f"request_error: {e}", "fetched_url": target}), 502
 
@@ -54,31 +69,15 @@ def fm_digest():
     m = re.search(r"<title>(.*?)</title>", r.text, re.I | re.S)
     title = (m.group(1).strip() if m else "")
 
-    return jsonify({
-        "ok": True,
-        "fetched_url": target,
-        "final_url": r.url,
-        "length": len(r.text),
-        "title": title
-    }), 200
+    return jsonify({"ok": True, "fetched_url": target, "final_url": r.url, "length": len(r.text), "title": title}), 200
 
 # -----------------------------------------------------------------------------
-# FinanzAmille: helpers + routes: article e batch
+# Parser articolo + batch
 # -----------------------------------------------------------------------------
-def fm_fetch(target_url: str):
-    cookie = os.getenv("FM_COOKIE", "")
-    headers = {
-        "Cookie": cookie,
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
-    r = requests.get(target_url, headers=headers, timeout=25, allow_redirects=True)
-    return r
-
 def extract_article_fields(html: str):
     soup = BeautifulSoup(html, "html.parser")
 
-    # Titolo: prova h1, poi title
+    # titolo
     title = ""
     h1 = soup.find("h1")
     if h1 and h1.get_text(strip=True):
@@ -86,7 +85,7 @@ def extract_article_fields(html: str):
     elif soup.title and soup.title.get_text(strip=True):
         title = soup.title.get_text(strip=True)
 
-    # Corpo: paragrafi dentro <article>, altrimenti fallback ai <p> principali
+    # testo
     body_texts = []
     article_tag = soup.find("article")
     if article_tag:
@@ -94,10 +93,9 @@ def extract_article_fields(html: str):
     if not body_texts:
         candidates = soup.select("main p") or soup.find_all("p")
         body_texts = [p.get_text(" ", strip=True) for p in candidates]
-
     text = "\n".join([t for t in body_texts if t])
 
-    # Mini riassunto euristico: prime 3-4 frasi
+    # mini-summary
     summary = ""
     if text:
         sentences = [s.strip() for s in text.split(".") if s.strip()]
@@ -121,14 +119,7 @@ def fm_article():
         return jsonify({"ok": False, "error": f"http_{r.status_code}", "fetched_url": url, "final_url": r.url}), r.status_code
 
     title, text, summary = extract_article_fields(r.text)
-    return jsonify({
-        "ok": True,
-        "url": url,
-        "final_url": r.url,
-        "title": title,
-        "summary": summary,
-        "chars": len(text)
-    }), 200
+    return jsonify({"ok": True, "url": url, "final_url": r.url, "title": title, "summary": summary, "chars": len(text)}), 200
 
 @app.get("/finanzamille/batch")
 def fm_batch():
@@ -153,6 +144,50 @@ def fm_batch():
     return jsonify({"ok": True, "count": len(items), "items": items}), 200
 
 # -----------------------------------------------------------------------------
+# 🔎 Scansione automatica: ultimi articoli dalla pagina indice
+# -----------------------------------------------------------------------------
+def discover_latest_urls(limit: int = 5):
+    """
+    Legge la pagina indice (FM_INDEX_PATH, default /blog-2-1) e ritorna
+    gli ultimi N URL articolo (assumendo pattern /blog-2-1/<slug>).
+    """
+    base = os.getenv("FM_BASE_URL", "https://www.finanzamille.com").rstrip("/")
+    index_path = os.getenv("FM_INDEX_PATH", "/blog-2-1")
+    if not index_path.startswith("/"):
+        index_path = "/" + index_path
+    index_url = base + index_path
+
+    try:
+        r = requests.get(index_url, headers=_fm_headers(), timeout=25)
+        if not r.ok:
+            return []
+        soup = BeautifulSoup(r.text, "html.parser")
+        hrefs = []
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            # prendi solo i link tipo /blog-2-1/<slug>
+            if re.match(r"^/blog-2-1/[^/]+$", href):
+                absu = _abs(base, href)
+                hrefs.append(absu)
+        # dedup mantenendo ordine
+        seen = set()
+        ordered = []
+        for u in hrefs:
+            if u not in seen:
+                ordered.append(u)
+                seen.add(u)
+        return ordered[:max(1, int(limit))]
+    except Exception:
+        return []
+
+@app.get("/finanzamille/latest")
+def fm_latest():
+    """Endpoint di debug: mostra le URL più recenti viste nell'indice."""
+    limit = int(request.args.get("limit", os.getenv("FM_LATEST_LIMIT", "5")))
+    urls = discover_latest_urls(limit=limit)
+    return jsonify(ok=True, count=len(urls), urls=urls)
+
+# -----------------------------------------------------------------------------
 # News: stub macro PM USA
 # -----------------------------------------------------------------------------
 @app.get("/news/scan")
@@ -173,43 +208,44 @@ def alpaca_health():
     return jsonify(ok=True, broker="alpaca", connected=False)
 
 # -----------------------------------------------------------------------------
-# Brief: aggregatore (in-process, no HTTP interni)
+# Brief (in-process, combina FM_URLS + latest dall'indice)
 # -----------------------------------------------------------------------------
 def build_brief_payload():
-    """Raccoglie tutto in JSON senza chiamate HTTP interne."""
     fm_urls_env = os.getenv("FM_URLS", "").strip()
-    fm_items = []
+    latest_limit = int(os.getenv("FM_LATEST_LIMIT", "5"))
 
-    if fm_urls_env:
-        fm_list = [u.strip() for u in fm_urls_env.split(",") if u.strip()]
-        for u in fm_list:
-            # Normalizza eventuali path relativi
-            if u.startswith("/"):
-                base = os.getenv("FM_BASE_URL", "https://www.finanzamille.com").rstrip("/")
-                full = base + u
+    # 1) URL fissi da env (opzionali)
+    fixed = [u.strip() for u in fm_urls_env.split(",") if u.strip()] if fm_urls_env else []
+
+    # 2) URL scoperti dall'indice
+    latest = discover_latest_urls(limit=latest_limit)
+
+    # merge + dedup (prima i latest, poi i fissi: i fissi sovrascrivono priorità se vuoi inverti)
+    merged = latest + fixed
+    seen = set()
+    urls = []
+    for u in merged:
+        if u not in seen:
+            urls.append(u)
+            seen.add(u)
+
+    # fetch e parse
+    fm_items = []
+    for full in urls:
+        try:
+            r = fm_fetch(full)
+            if r.status_code == 200 and "login" not in r.url.lower():
+                title, text, summary = extract_article_fields(r.text)
+                fm_items.append({"ok": True, "url": full, "title": title, "summary": summary})
             else:
-                full = u
-            try:
-                r = fm_fetch(full)
-                if r.status_code == 200 and "login" not in r.url.lower():
-                    title, text, summary = extract_article_fields(r.text)
-                    fm_items.append({"ok": True, "url": full, "title": title, "summary": summary})
-                else:
-                    fm_items.append({"ok": False, "url": full, "status": r.status_code, "final_url": r.url})
-            except Exception as e:
-                fm_items.append({"ok": False, "url": full, "error": str(e)})
+                fm_items.append({"ok": False, "url": full, "status": r.status_code, "final_url": r.url})
+        except Exception as e:
+            fm_items.append({"ok": False, "url": full, "error": str(e)})
 
     nws = news_scan().get_json()
     alp = alpaca_health().get_json()
-
     ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    return {
-        "ok": True,
-        "generated_at": ts,
-        "finanzamille": {"items": fm_items},
-        "news": nws,
-        "alpaca": alp
-    }
+    return {"ok": True, "generated_at": ts, "finanzamille": {"items": fm_items}, "news": nws, "alpaca": alp}
 
 @app.get("/brief/run")
 def brief_run():
@@ -221,8 +257,6 @@ def brief_text():
     lines = []
     lines.append(f"[Investment Sentinel] Brief - {data['generated_at']}")
     lines.append("")
-
-    # FinanzAmille
     lines.append("FinanzAmille (oggi)")
     items = data.get("finanzamille", {}).get("items", [])
     if items:
@@ -234,35 +268,22 @@ def brief_text():
     else:
         lines.append("* Nessun articolo disponibile o accesso non valido")
     lines.append("")
-
-    # News
     lines.append("Mercati (PM USA)")
-    news_items = data.get("news", {}).get("items", [])
-    if news_items:
-        for it in news_items:
-            headline = it.get("headline", "")
-            impact = it.get("impact", "")
-            if headline:
-                lines.append(f"* {headline} [{impact}]")
-    else:
-        lines.append("* Nessun aggiornamento macro disponibile")
+    for it in data.get("news", {}).get("items", []):
+        headline = it.get("headline", "")
+        impact = it.get("impact", "")
+        if headline:
+            lines.append(f"* {headline} [{impact}]")
     lines.append("")
-
-    # Broker
     alp = data.get("alpaca", {})
     lines.append(f"Broker: Alpaca connected={alp.get('connected', False)}")
     lines.append("")
-
-    # Azioni proposte - placeholder conservativo
     lines.append("Azioni proposte")
     lines.append("* Nessuna urgenza. Mantieni profilo prudente. Per piazzare ordini rispondi con CONFERMO e dettagli.")
-
     txt = "\n".join(lines)
     return Response(txt, mimetype="text/plain")
 
-# -----------------------------------------------------------------------------
-# Wrapper comodi (in-process)
-# -----------------------------------------------------------------------------
+# Alias comodi
 @app.get("/brief/direct")
 def brief_direct():
     try:
@@ -278,7 +299,7 @@ def wake():
         return jsonify({"ok": False, "error": str(e)}), 502
 
 # -----------------------------------------------------------------------------
-# Avvio WSGI (solo esecuzione diretta)
+# Avvio WSGI
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
