@@ -1,106 +1,99 @@
-import os, io, csv, re, requests, datetime as dt
-from flask import Flask, request, jsonify
+import os
+from datetime import datetime
+from flask import Flask, jsonify, request, Response
 
 app = Flask(__name__)
 
-# ---------- UTILS ----------
-def now_iso():
-    return dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
-
-def ok(data=None, **extra):
-    base = {"ok": True, "timestamp": now_iso()}
-    if data:
-        base.update(data)
-    base.update(extra)
-    return jsonify(base), 200
-
-def err(msg, code=400):
-    return jsonify({"ok": False, "error": msg}), code
-
-# ---------- HEALTH ----------
+# ---- Endpoints di base (già esistenti/compatibili) --------------------------
 @app.get("/health")
 def health():
-    return ok({"service": "investment-sentinel-api"})
+    return jsonify(ok=True, service="investment-sentinel-api")
 
-# ---------- FINANZAMILLE ----------
 @app.get("/finanzamille/digest")
 def finanzamille_digest():
+    # Stub: finché non mettiamo le credenziali, restituiamo esempi coerenti
     limit = int(request.args.get("limit", 5))
-    seeds = [
-        "https://www.finanzamille.com/daily-news",
-        "https://www.finanzamille.com"
-    ]
-    items, seen = [], set()
-    headers = {"User-Agent": "Mozilla/5.0"}
+    items = [
+        {"title": "Esempio: Tassi in rialzo", "topics": ["rates","macro"], "sentiment": "neutral"},
+        {"title": "Esempio: Tech rimbalza",   "topics": ["equities","tech"], "sentiment": "positive"},
+        {"title": "Esempio: Energia debole",  "topics": ["commodities","energy"], "sentiment": "negative"},
+    ][:limit]
+    return jsonify(ok=True, count=len(items), items=items)
 
-    for seed in seeds:
-        try:
-            html = requests.get(seed, headers=headers, timeout=12).text
-        except Exception:
-            continue
-        for m in re.finditer(r'href="([^"]+)"[^>]*>([^<]{3,120})</a>', html):
-            url, title = m.group(1), re.sub(r"\s+", " ", m.group(2)).strip()
-            if not url.startswith("http"):
-                if url.startswith("/"): url = f"https://www.finanzamille.com{url}"
-                else: url = f"https://www.finanzamille.com/{url}"
-            if "blog-2-1" not in url or url in seen:
-                continue
-            seen.add(url)
-            items.append({"title": title, "url": url})
-            if len(items) >= limit:
-                break
-        if len(items) >= limit:
-            break
-    return ok({"count": len(items), "items": items})
-
-# ---------- NEWS SCAN ----------
 @app.get("/news/scan")
 def news_scan():
+    # Stub PM-USA. window/region per compatibilità
     region = request.args.get("region", "us")
     window = request.args.get("window", "6h")
-    sample = [
-        f"[{region.upper()}] Fed speakers in focus, volatility low",
-        "Oil dips slightly, gold steady, USD mixed",
-        "Tech leads equities rebound; yields stable"
+    items = [
+        {"headline": "Fed officials: 'higher for longer' sul tavolo", "tags": ["rates","fed"], "impact":"medium"},
+        {"headline": "NASDAQ green nel pomeriggio", "tags": ["tech","equities"], "impact":"low"},
     ]
-    return ok({"region": region, "window": window, "headlines": sample})
+    return jsonify(ok=True, region=region, window=window, items=items)
 
-# ---------- PORTFOLIO CSV IMPORT ----------
-@app.post("/portfolio/csv/import")
-def portfolio_csv_import():
-    import io, csv
-    if "file" in request.files:
-        content = request.files["file"].read().decode("utf-8", errors="ignore")
-    else:
-        data = request.get_json(silent=True) or {}
-        csv_url = data.get("csv_url")
-        if not csv_url:
-            return err("No CSV provided")
-        content = requests.get(csv_url, timeout=15).text
-
-    reader = csv.DictReader(io.StringIO(content))
-    rows = []
-    for r in reader:
-        try:
-            rows.append({
-                "ticker": r["ticker"].upper(),
-                "qty": float(r["qty"]),
-                "buy_price": float(r["buy_price"]),
-                "buy_date": r.get("buy_date", ""),
-                "account": r.get("account", "ibkr"),
-                "spot": None,
-                "pnl": None
-            })
-        except Exception:
-            continue
-    return ok({"positions": rows, "count": len(rows)})
-
-# ---------- ALPACA HEALTH ----------
 @app.get("/alpaca/health")
 def alpaca_health():
-    connected = bool(os.environ.get("ALPACA_API_KEY"))
-    return ok({"connected": connected})
+    # Quando avrai le API, qui metteremo la vera chiamata
+    return jsonify(ok=True, broker="alpaca", connected=False)
 
-# ---------- MAIN ----------
+# ---- Aggregatore: /brief ----------------------------------------------------
+def _mk_recommendations(fm, news):
+    recs = []
+    # Esempio di logica super semplice
+    if any(i.get("sentiment") == "negative" and "energy" in i.get("topics", []) for i in fm.get("items", [])):
+        recs.append("Energia debole: valuta stop-loss più stretti su titoli energy.")
+    if any("fed" in (i.get("tags") or []) for i in news.get("items", [])):
+        recs.append("Tassi: profilo prudente; evita nuova leva finché il quadro sui rendimenti non migliora.")
+    if not recs:
+        recs.append("Nessuna urgenza. Mantieni impostazione conservativa.")
+    return recs
+
+@app.get("/brief/run")
+def brief_run():
+    # Chiama internamente le funzioni sopra (più veloce/robusto di richiamare via HTTP)
+    fm = finanzamille_digest().get_json()
+    nws = news_scan().get_json()
+    alp = alpaca_health().get_json()
+
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    recommendations = _mk_recommendations(fm, nws)
+
+    payload = {
+        "ok": True,
+        "generated_at": ts,
+        "finanzamille": fm,
+        "news": nws,
+        "alpaca": alp,
+        "recommendations": recommendations
+    }
+    return jsonify(payload)
+
+@app.get("/brief/text")
+def brief_text():
+    data = brief_run().get_json()
+    lines = []
+    lines.append(f"[Investment Sentinel] Brief – {data['generated_at']}")
+    lines.append("")
+    # FinanzAmille
+    lines.append("— FinanzAmille (ultimi):")
+    for it in data["finanzamille"]["items"]:
+        lines.append(f"  • {it['title']}  [sentiment: {it['sentiment']}]")
+    lines.append("")
+    # News
+    lines.append(f"— News scan ({data['news']['region']}, {data['news']['window']}):")
+    for it in data["news"]["items"]:
+        lines.append(f"  • {it['headline']}  [impact: {it['impact']}]")
+    lines.append("")
+    # Alpaca
+    lines.append(f"— Broker: Alpaca connected={data['alpaca']['connected']}")
+    lines.append("")
+    # Azioni consigliate
+    lines.append("— Azioni consigliate:")
+    for r in data["recommendations"]:
+        lines.append(f"  • {r}")
+    txt = "\n".join(lines)
+    return Response(txt, mimetype="text/plain")
+
+# ---- Avvio WSGI -------------------------------------------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
